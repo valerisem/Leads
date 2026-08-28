@@ -12,6 +12,13 @@ const schema = z.object({
   DNS_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
   DNS_TIMEOUT_MS: z.coerce.number().int().positive().default(4000),
 
+  /** Actually fetch the homepage to prove a site is live, not just resolvable. */
+  WEBSITE_LIVENESS_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+  WEBSITE_TIMEOUT_MS: z.coerce.number().int().positive().default(6000),
+
   /** How often the disposable-domain blocklist is refreshed, in hours. */
   DISPOSABLE_REFRESH_HOURS: z.coerce.number().positive().default(24),
   /** Skip the network fetch and rely on the bundled seed list (used by tests). */

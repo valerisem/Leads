@@ -4,6 +4,7 @@ import { parseEmail } from "./email.js";
 import { assessFormQuality } from "./formQuality.js";
 import { isFreeProvider } from "./freeProviders.js";
 import { isRoleAccount } from "./roleAccounts.js";
+import type { LivenessChecker, LivenessResult } from "./liveness.js";
 import type { Tier1Verifier } from "./tier1.js";
 import { parseWebsite, sameSite } from "./website.js";
 import type {
@@ -32,6 +33,8 @@ const SEVERITY_ORDER: Record<Signal["severity"], number> = {
 export interface ValidatorOptions {
   dns: DnsResolver;
   disposable: DisposableDomainList;
+  /** Omit to skip the live-site check and judge on DNS alone. */
+  liveness?: LivenessChecker;
   tier1?: Tier1Verifier;
   validThreshold: number;
   suspiciousThreshold: number;
@@ -203,9 +206,15 @@ export class LeadValidator {
     signals: Signal[],
   ): Promise<WebsiteAssessment> {
     const raw = input.companyWebsite?.trim() || null;
-    const parsed = parseWebsite(raw);
+    const stated = parseWebsite(raw);
 
-    if (!parsed) {
+    // When the website field is junk or blank, a corporate email domain is the
+    // best available guess at the company's site, and it is worth checking.
+    const inferred =
+      !stated && email.domain && !email.isFreeProvider ? email.domain : null;
+    const hostname = stated?.hostname ?? inferred;
+
+    if (!stated) {
       signals.push(
         raw
           ? {
@@ -221,42 +230,64 @@ export class LeadValidator {
               weight: 20,
             },
       );
+    }
+
+    if (!hostname) {
       return {
         raw,
         hostname: null,
         parsed: false,
         resolves: false,
+        liveness: null,
+        httpStatus: null,
+        finalUrl: null,
+        inferredFromEmailDomain: false,
         matchesEmailDomain: false,
       };
     }
 
-    const records = await this.options.dns.lookup(parsed.hostname);
+    const inferredFromEmailDomain = !stated;
+    const where = inferredFromEmailDomain
+      ? `${hostname} (from the email domain)`
+      : hostname;
+
+    const records = await this.options.dns.lookup(hostname);
     const resolves = records.hasAddressRecord || records.hasMx;
+
+    let liveness: LivenessResult | null = null;
 
     if (records.lookupFailed) {
       signals.push({
         code: "website_lookup_failed",
-        label: `Could not resolve DNS for ${parsed.hostname} — site unverified`,
+        label: `Could not resolve DNS for ${where} — site unverified`,
         severity: "minor",
         weight: 5,
       });
     } else if (!resolves) {
       signals.push({
         code: "website_does_not_resolve",
-        label: `Company website ${parsed.hostname} does not resolve`,
+        label: `Company website ${where} does not exist in DNS`,
         severity: "major",
-        weight: 25,
+        weight: inferredFromEmailDomain ? 10 : 25,
+        ...(inferredFromEmailDomain ? {} : { capsVerdictAt: "suspicious" as const }),
       });
+    } else if (this.options.liveness) {
+      // DNS says the domain exists. That is not the same as a working site,
+      // so actually fetch the homepage and see what comes back.
+      liveness = await this.options.liveness.check(hostname);
+      signals.push(...livenessSignals(liveness, where, inferredFromEmailDomain));
     }
 
     const matchesEmailDomain =
-      email.domain !== null && sameSite(parsed.hostname, email.domain);
+      !inferredFromEmailDomain &&
+      email.domain !== null &&
+      sameSite(hostname, email.domain);
 
     if (matchesEmailDomain) {
       // The strongest positive available for free: their address is on their own site.
       signals.push({
         code: "email_matches_website",
-        label: `Email address is on the company's own domain (${parsed.hostname})`,
+        label: `Email address is on the company's own domain (${hostname})`,
         severity: "positive",
         weight: -15,
       });
@@ -264,9 +295,13 @@ export class LeadValidator {
 
     return {
       raw,
-      hostname: parsed.hostname,
-      parsed: true,
+      hostname,
+      parsed: Boolean(stated),
       resolves,
+      liveness: liveness?.state ?? null,
+      httpStatus: liveness?.status ?? null,
+      finalUrl: liveness?.finalUrl ?? null,
+      inferredFromEmailDomain,
       matchesEmailDomain,
     };
   }
@@ -307,5 +342,89 @@ export class LeadValidator {
     );
 
     return { verdict, score };
+  }
+}
+
+/**
+ * A domain that resolves but serves nothing is the case DNS alone cannot catch:
+ * parked shells and dead sites both have perfectly good A records.
+ */
+function livenessSignals(
+  liveness: LivenessResult,
+  where: string,
+  inferred: boolean,
+): Signal[] {
+  // An inferred hostname is a guess, so it carries less weight than a website
+  // the person actually typed into the form.
+  const scale = (weight: number) => (inferred ? Math.round(weight / 2) : weight);
+
+  switch (liveness.state) {
+    case "live":
+      return [
+        {
+          code: "website_live",
+          label: `Company website ${where} is live`,
+          severity: "positive",
+          weight: -10,
+        },
+      ];
+
+    case "protected":
+      // Neutral on purpose: a bot-blocked response proves a server is there but
+      // proves nothing about the content, so it earns neither credit nor blame.
+      return [
+        {
+          code: "website_protected",
+          label:
+            `Company website ${where} responds but blocks automated checks ` +
+            `(HTTP ${liveness.status}) — content unverified`,
+          severity: "minor",
+          weight: 0,
+        },
+      ];
+
+    case "parked":
+      return [
+        {
+          code: "website_parked",
+          label: `Company website ${where} is a parked / for-sale domain, not a real site`,
+          severity: "major",
+          weight: scale(35),
+          // A company with no real website is never a confirmed prospect,
+          // however well the rest of the form reads.
+          ...(inferred ? {} : { capsVerdictAt: "suspicious" as const }),
+        },
+      ];
+
+    case "placeholder":
+      return [
+        {
+          code: "website_placeholder",
+          label: `Company website ${where} serves only a placeholder page`,
+          severity: "major",
+          weight: scale(20),
+        },
+      ];
+
+    case "http_error":
+      return [
+        {
+          code: "website_http_error",
+          label: `Company website ${where} returns HTTP ${liveness.status}`,
+          severity: "major",
+          weight: scale(20),
+        },
+      ];
+
+    case "unreachable":
+      return [
+        {
+          code: "website_unreachable",
+          label: `Company website ${where} resolves in DNS but serves no website`,
+          severity: "major",
+          weight: scale(30),
+          ...(inferred ? {} : { capsVerdictAt: "suspicious" as const }),
+        },
+      ];
   }
 }

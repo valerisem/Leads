@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Config } from "./config.js";
 import { DisposableDomainList } from "./lib/disposable.js";
 import { DnsResolver } from "./lib/dns.js";
+import { LivenessChecker } from "./lib/liveness.js";
 import { Tier1Verifier } from "./lib/tier1.js";
 import { LeadValidator } from "./lib/validator.js";
 import { registerValidateRoutes } from "./routes/validate.js";
@@ -29,6 +30,10 @@ export function buildServer(config: Config): BuiltServer {
     offline: config.DISPOSABLE_OFFLINE,
   });
 
+  const liveness = config.WEBSITE_LIVENESS_ENABLED
+    ? new LivenessChecker({ timeoutMs: config.WEBSITE_TIMEOUT_MS })
+    : undefined;
+
   const tier1 =
     config.EMAIL_VERIFY_PROVIDER && config.EMAIL_VERIFY_API_KEY
       ? new Tier1Verifier({
@@ -40,6 +45,7 @@ export function buildServer(config: Config): BuiltServer {
   const validator = new LeadValidator({
     dns,
     disposable,
+    liveness,
     tier1,
     validThreshold: config.SCORE_VALID_THRESHOLD,
     suspiciousThreshold: config.SCORE_SUSPICIOUS_THRESHOLD,
@@ -51,6 +57,7 @@ export function buildServer(config: Config): BuiltServer {
     disposableDomains: disposable.size,
     disposableListRefreshedAt: disposable.lastRefreshed,
     tier1: config.EMAIL_VERIFY_PROVIDER ?? null,
+    livenessCheck: config.WEBSITE_LIVENESS_ENABLED,
   }));
 
   if (config.API_KEY) {

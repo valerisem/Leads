@@ -19,6 +19,9 @@ export interface Signal {
 
 export type Verdict = "valid" | "suspicious" | "invalid";
 
+export type { LivenessState } from "./liveness.js";
+import type { LivenessState } from "./liveness.js";
+
 /** How deliverable the address itself looks, independent of lead quality. */
 export type Deliverability = "deliverable" | "risky" | "undeliverable" | "unknown";
 
@@ -38,7 +41,16 @@ export interface WebsiteAssessment {
   /** Hostname we managed to parse out, or null if the value was not a URL at all. */
   hostname: string | null;
   parsed: boolean;
+  /** Domain exists in DNS. Says nothing about whether a site is actually served. */
   resolves: boolean;
+  /** Whether a real page is actually served: this is the live-site check. */
+  liveness: LivenessState | null;
+  /** HTTP status of the final response, after redirects. */
+  httpStatus: number | null;
+  /** URL after redirects — reveals an off-site redirect to a parking service. */
+  finalUrl: string | null;
+  /** True when the hostname came from the email domain, not the website field. */
+  inferredFromEmailDomain: boolean;
   /** True when the website hostname and the email domain agree. */
   matchesEmailDomain: boolean;
 }

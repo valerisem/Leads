@@ -1,5 +1,6 @@
 import { DisposableDomainList } from "../src/lib/disposable.js";
 import { DnsResolver } from "../src/lib/dns.js";
+import { LivenessChecker, type LivenessResult, type LivenessState } from "../src/lib/liveness.js";
 import { LeadValidator } from "../src/lib/validator.js";
 
 export interface FakeZone {
@@ -34,10 +35,34 @@ export function offlineDisposableList(): DisposableDomainList {
   return new DisposableDomainList({ refreshHours: 24, offline: true });
 }
 
-export function buildValidator(zones: Record<string, FakeZone>): LeadValidator {
+/**
+ * A LivenessChecker backed by a fixture table. Hostnames with no entry are
+ * treated as live, so tests only declare the sites they care about.
+ */
+export function fakeLiveness(
+  sites: Record<string, LivenessState>,
+): LivenessChecker {
+  const checker = new LivenessChecker({ timeoutMs: 1000 });
+  checker.check = async (hostname: string): Promise<LivenessResult> => {
+    const state = sites[hostname] ?? "live";
+    return {
+      state,
+      status: state === "unreachable" ? null : state === "http_error" ? 404 : 200,
+      finalUrl: state === "unreachable" ? null : `https://${hostname}/`,
+      scheme: state === "unreachable" ? null : "https",
+    };
+  };
+  return checker;
+}
+
+export function buildValidator(
+  zones: Record<string, FakeZone>,
+  sites: Record<string, LivenessState> = {},
+): LeadValidator {
   return new LeadValidator({
     dns: fakeDns(zones),
     disposable: offlineDisposableList(),
+    liveness: fakeLiveness(sites),
     validThreshold: 70,
     suspiciousThreshold: 40,
   });

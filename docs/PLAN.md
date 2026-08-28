@@ -25,6 +25,7 @@ Organization / Person / Lead in Pipedrive — happens automatically before the c
 | `discord_interactions` edge function | same project | Existing Monday.com approve/decline handler. Useful as a shape reference, **but see the two defects below** |
 | Pipedrive account | `Pipedrive` MCP / REST | Leads API in use; leads carry `owner_id`, `organization_id`, `person_id`, `is_archived`, `label_ids` |
 | Railway `Outreach prod` | Railway | Redis + Postgres + `HoM` service. Not needed for this. |
+| Discord channel `1489334181405266083` | Discord | Existing channel, reused for the lead cards |
 
 Nothing lead-related, Discord-config-related or Pipedrive-sync-related exists in the
 database yet — this feature is greenfield.
@@ -40,27 +41,23 @@ database yet — this feature is greenfield.
 
 ---
 
-## Assignee dropdown — and one blocker
+## Assignee dropdown — resolved
 
-The three named people resolve to:
+Exactly three people can be assigned a lead. All three have a Pipedrive user id, so the
+dropdown works with no outstanding gaps:
 
-| Person | `team.id` | Pipedrive `pd_id` | Discord id |
-|---|---|---|---|
-| Valeria Semibratnya (head of operations) | 3 | **NULL — blocker** | 1189508895060791307 |
-| Valeriia Mukhai — the "double i" one (client director) | 10 | 23093401 | 1186245045729366016 |
-| *third person — not yet named* | ? | ? | ? |
+| Person | Role | `team.id` | Pipedrive `pd_id` | Discord id |
+|---|---|---|---|---|
+| Carrick Klopper | partnership manager | 11 | 23723008 | 1372919114863083580 |
+| Valeriia Mukhai | client director | 10 | 23093401 | 1186245045729366016 |
+| Ritchie Boubouli | director of new partnerships | 9 | 23093412 | 1232286685707112450 |
 
-**Blocker:** Valeria Semibratnya has no `pd_id` in the `team` table, so there is nothing to
-write into Pipedrive's `owner_id` for her. Before the dropdown can work we need either her
-Pipedrive user id (then `update team set pd_id = ... where id = 3`), or confirmation that
-she is not a Pipedrive user and should be dropped from the list.
+The dropdown is **built from the database, not hardcoded** — an `is_lead_assignee` boolean on
+`team`, seeded `true` for these three. Adding or removing someone later is a one-row update,
+not a redeploy, and the Discord option label comes from `full_name` so it stays in sync.
 
-**Open:** the message named only two of the three people. Candidates with a `pd_id`, most
-sales-facing first: Ritchie Boubouli (director of new partnerships, `23093412`),
-Carrick Klopper (partnership manager, `23723008`), Inigo Rivero (CEO, `23072424`).
-
-The dropdown will be **built from the database, not hardcoded** — a `team.is_lead_assignee`
-boolean flag — so changing who appears is a one-row update, not a redeploy.
+Their `discord_id` values also let the handler check that the person clicking is a known team
+member, and record *who* assigned the lead rather than just *to whom*.
 
 ---
 
@@ -276,30 +273,27 @@ cannot create the lead twice.
 ### Secrets
 
 `PIPEDRIVE_API_TOKEN`, `DISCORD_BOT_TOKEN`, `DISCORD_PUBLIC_KEY`, `DISCORD_APP_ID`,
-`DISCORD_LEADS_CHANNEL_ID`, `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN`,
+`DISCORD_LEADS_CHANNEL_ID` (= `1489334181405266083`), `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN`,
 and optionally `EMAIL_VERIFY_API_KEY`.
 
 ---
 
 ## Open decisions
 
-These do not block starting on the schema, the validation module or the Pipedrive client,
-but they do block a working end-to-end pipeline:
+Neither blocks starting on the schema, the validation module or the Pipedrive client:
 
-1. **Valeria Semibratnya's Pipedrive user id** — `team.pd_id` is NULL for her. Blocks the
-   dropdown. *(hard blocker)*
-2. **The third assignee** — only two of three were named.
-3. **Which inbox receives the leads.** The Gmail connected to this session is the personal
+1. **Which inbox receives the leads.** The Gmail connected to this session is the personal
    `semibvaleria@gmail.com`, not the work inbox. The plan assumes a Google Workspace address
    read via the Gmail API. If leads instead arrive from a form provider (Typeform, Webflow,
    HubSpot), hooking that webhook directly is simpler and more reliable than parsing email.
-4. **Which Discord channel** the cards go to, and whether an existing Discord app can be
-   reused or a new one is needed.
-5. **Activity defaults** — assumed type `task`, due next business day, and note *not* also
+   *(this is the one real blocker for an end-to-end pipeline)*
+2. **Activity defaults** — assumed type `task`, due next business day, and the note *not* also
    duplicated as a pinned Note on the lead. All three are one-line changes.
-6. **What "Ignore" does in Pipedrive.** Assumed: archive (`is_archived: true`) — reversible
+3. **What "Ignore" does in Pipedrive.** Assumed: archive (`is_archived: true`) — reversible
    and keeps the audit trail. Alternatives: apply an "Ignored" label, delete, or change
    nothing in Pipedrive and only grey out the Discord card.
+4. **Who may use the controls.** Assumed: anyone in channel `1489334181405266083`. If it
+   should be restricted, the `team.discord_id` lookup is already there to enforce it.
 
 ---
 

@@ -8,7 +8,8 @@ decides whether the lead is real, creates it in Pipedrive, and works out who sho
 This pipeline automates the mechanical parts and leaves the two human judgements —
 *is this junk?* and *who owns it?* — as one Discord card with two controls:
 
-- a **Assign owner** dropdown that writes the owner back to Pipedrive, and
+- an **Assign owner** dropdown that writes the owner back to Pipedrive and opens a note box,
+  creating a Pipedrive Activity assigned to that person, and
 - an **Ignore** button that is entirely optional (a card nobody touches is simply left alone).
 
 Everything else — parsing the email, validating the sender's domain, creating the
@@ -141,10 +142,86 @@ Discord: POST card to the leads channel
          └─ Button (danger) "Ignore"      custom_id lead_ignore:<row_id>
    │
    ▼
-discord_lead_interactions  (verify_jwt:false + Ed25519 verify + type 5 defer)
-   ├─ select → PATCH /v1/leads/{id} {owner_id: <pd_id>}  → edit card "Assigned to X"
-   └─ ignore → PATCH /v1/leads/{id} {is_archived: true}  → edit card "Ignored", strip controls
+discord_lead_interactions  (verify_jwt:false + Ed25519 verify)
+   ├─ select  → respond type 9 MODAL immediately  ── "Add a note (optional)"
+   │              │
+   │              ▼  MODAL_SUBMIT
+   │           defer (type 5) → PATCH /v1/leads/{id} {owner_id: <pd_id>}
+   │                          → POST /v1/activities {owner_id, lead_id, subject, note}
+   │                          → edit card "Assigned to X · activity created"
+   └─ ignore  → defer (type 5) → PATCH /v1/leads/{id} {is_archived: true}
+                               → edit card "Ignored", strip controls
 ```
+
+---
+
+## Assignment note → Pipedrive Activity
+
+When someone picks an owner, they get a note box, and the note becomes a **Pipedrive Activity
+assigned to the new owner** — so the assignee gets a real task in their own Pipedrive queue
+rather than just a silently changed owner field.
+
+### Verified against the live Pipedrive account
+
+Reading real activities back confirms the field that does the "tagging":
+
+- **`owner_id` is the assigned user.** Live examples: activity 14306 has `owner_id: 26008478`
+  (Sarineh), activity 14305 has `owner_id: 23723008` (Carrick). Same `pd_id` values as the
+  `team` table — so the dropdown selection maps straight onto it.
+- **`lead_id` is a supported link field** on activities, so the Activity attaches to the lead
+  itself, not just to the person or organization.
+- **`note` is free HTML**, which is where the Discord text goes.
+- Also available and worth setting: `subject`, `type`, `due_date`, `due_time`, `priority`,
+  `done`, `person_id`, `org_id`.
+
+**Use `owner_id`, not an @-mention.** Pipedrive notes can carry @-mention markup, but it is
+brittle undocumented HTML. Assigning `owner_id` is the supported, reliable way to make the
+activity show up in that person's task list and notify them.
+
+**One caveat:** `creator_user_id` is always the user the API token belongs to, so every
+bot-created activity will read as created by that service user — not by the person who
+clicked in Discord. The real clicker is therefore recorded two ways: prepended to the
+activity note ("Assigned by @inigo via Discord") and stored in `lead_events`.
+
+### Discord modal mechanics
+
+Collecting free text needs a modal, and modals have two hard constraints that shape the flow:
+
+1. **A modal must be the *immediate* response to the select interaction** — response type 9,
+   within the 3-second window. You cannot defer first and send a modal afterwards. So the
+   select handler does *no* Pipedrive work; it only opens the modal.
+2. **The Pipedrive work happens on `MODAL_SUBMIT`**, which is a separate interaction. That one
+   is deferred (type 5), then the writes happen, then the card is edited.
+
+The modal carries its state in the `custom_id`: `lead_note:<row_id>:<assignee_pd_id>`
+(well within the 100-character limit). It holds one paragraph-style text input
+(`style: 2`) marked **`required: false`** — an assignment should never be blocked by a
+mandatory note. A blank note still creates the activity, just with the default subject.
+
+To edit the card afterwards, the handler uses the bot token against the stored
+`discord_message_id` (`PATCH /channels/{channel_id}/messages/{message_id}`) rather than the
+interaction's `@original` endpoint. Message-edit semantics differ between component and
+modal-submit interactions; going through the stored id behaves identically in both cases.
+
+### The activity that gets created
+
+```ts
+addActivity({
+  lead_id:  lead.pd_lead_id,
+  owner_id: assignee.pd_id,          // ← the "tag": lands in their task list
+  subject:  `Follow up: ${lead.title}`,
+  type:     'task',
+  due_date: nextBusinessDay(),
+  person_id: lead.pd_person_id,
+  org_id:    lead.pd_org_id,
+  note: `${noteFromModal || '(no note)'}<br><br>` +
+        `<i>Assigned by ${discordUsername} via Discord</i>`,
+})
+```
+
+Defaults worth confirming with you: activity **type** `task`, **due date** next business day,
+and whether the note should *also* be added as a pinned Note on the lead (`addNote` with
+`pinned_to_lead_flag: 1`) so it shows in the lead's note feed as well as on the activity.
 
 ---
 
@@ -155,11 +232,11 @@ All new. Repo is currently empty.
 | Path | Purpose |
 |---|---|
 | `supabase/migrations/0001_leads.sql` | `leads_inbox`, `disposable_domains`, `lead_events` tables; `team.is_lead_assignee` column; RLS; pg_cron jobs |
-| `supabase/functions/_shared/pipedrive.ts` | Thin Pipedrive REST client (`searchOrganization`, `addOrganization`, `addPerson`, `addLead`, `updateLead`, `addNote`) |
+| `supabase/functions/_shared/pipedrive.ts` | Thin Pipedrive REST client (`searchOrganization`, `addOrganization`, `addPerson`, `addLead`, `updateLead`, `addNote`, `addActivity`) |
 | `supabase/functions/_shared/validate_domain.ts` | Tier 0 checks + optional Tier 1; returns `{verdict, reasons[]}` |
-| `supabase/functions/_shared/discord.ts` | Ed25519 verification, card builder, message PATCH helper |
+| `supabase/functions/_shared/discord.ts` | Ed25519 verification, card builder, **modal builder**, message PATCH helper |
 | `supabase/functions/leads_email_ingest/index.ts` | Gmail poll → validate → Pipedrive → post card |
-| `supabase/functions/discord_lead_interactions/index.ts` | Interaction handler for select + button |
+| `supabase/functions/discord_lead_interactions/index.ts` | Interaction handler: PING, select → modal, modal submit → Pipedrive, ignore button |
 | `supabase/functions/sync_disposable_domains/index.ts` | Nightly blocklist refresh |
 | `docs/SETUP.md` | Discord app setup, secrets, Gmail OAuth, endpoint registration |
 
@@ -186,6 +263,8 @@ create table leads_inbox (
                        check (status in ('new','assigned','ignored')),
   assigned_pd_id     numeric,
   assigned_by        numeric,                   -- team.discord_id of the clicker
+  assign_note        text,                      -- free text typed into the Discord modal
+  pd_activity_id     bigint,                    -- Activity created for the assignee
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now()
 );
@@ -216,7 +295,9 @@ but they do block a working end-to-end pipeline:
    HubSpot), hooking that webhook directly is simpler and more reliable than parsing email.
 4. **Which Discord channel** the cards go to, and whether an existing Discord app can be
    reused or a new one is needed.
-5. **What "Ignore" does in Pipedrive.** Assumed: archive (`is_archived: true`) — reversible
+5. **Activity defaults** — assumed type `task`, due next business day, and note *not* also
+   duplicated as a pinned Note on the lead. All three are one-line changes.
+6. **What "Ignore" does in Pipedrive.** Assumed: archive (`is_archived: true`) — reversible
    and keeps the audit trail. Alternatives: apply an "Ignored" label, delete, or change
    nothing in Pipedrive and only grey out the Discord card.
 
@@ -231,12 +312,19 @@ but they do block a working end-to-end pipeline:
    `getLead` that owner, org, person and note are set, then archive it. The Pipedrive MCP
    tools (`getLead`, `getLeads`, `searchOrganization`) can confirm state independently of our
    own code.
-3. **Discord endpoint handshake** — Discord will only save the interactions URL if the Ed25519
+3. **Activity creation, against the live account** — create an activity with
+   `owner_id` set to a test user and `lead_id` set to a fixture lead, then read it back with
+   `getActivities({lead_id})` and assert `owner_id` matches the dropdown selection and `note`
+   contains the modal text. Confirm in the Pipedrive UI that it appears in that user's task
+   list — that is the real proof the person was "tagged".
+4. **Discord endpoint handshake** — Discord will only save the interactions URL if the Ed25519
    verification and the PING (`type: 1` → `{"type": 1}`) response are both correct. Saving the
    URL in the Discord developer portal *is* the test.
-4. **End to end** — send a test email to the leads inbox from a throwaway company domain and
+5. **End to end** — send a test email to the leads inbox from a throwaway company domain and
    from a disposable one. Expect: two Pipedrive leads, two Discord cards with different
-   verdicts. Pick an owner on one → confirm `owner_id` changed via `getLead`. Click Ignore on
-   the other → confirm `is_archived: true`.
-5. **Idempotency** — run the ingest twice against the same inbox state. Expect zero new rows
+   verdicts. Pick an owner on one → a modal opens → type a note → confirm via `getLead` that
+   `owner_id` changed, and via `getActivities({lead_id})` that an activity exists with that
+   `owner_id` and the typed note. Submit the modal *empty* on a second run to confirm the
+   assignment still succeeds. Click Ignore on the other → confirm `is_archived: true`.
+6. **Idempotency** — run the ingest twice against the same inbox state. Expect zero new rows
    and zero new Pipedrive leads.

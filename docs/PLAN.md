@@ -66,6 +66,10 @@ member, and record *who* assigned the lead rather than just *to whom*.
 This is the "cheap, ideally free" layer. It runs **before** the Pipedrive write, and its
 verdict is shown on the Discord card so a human can override it.
 
+**Validate the right domain.** The mail arrives from `noreply@salesmatemail.com` — Salesmate's
+notification sender. Validating *that* domain is meaningless. The two things worth checking are
+the **`Email Address` field** from the form body and the **`Company Website` field**.
+
 ### Tier 0 — costs nothing, no API key, no rate limit
 
 Catches the large majority of junk on its own:
@@ -102,6 +106,26 @@ a free quota.
 behind an optional `EMAIL_VERIFY_API_KEY` env var so it can be switched on later without a
 code change — start with Abstract's free 100/mo, and only pay if the ambiguous-case volume
 justifies it.
+
+### Form-quality heuristic (also free)
+
+The sample submission shows why MX alone is not enough. Its fields:
+
+| Field | Value | Signal |
+|---|---|---|
+| Email Address | `alexandra.mus@icloud.com` | free provider — **icloud.com passes MX** |
+| Company Name | `Alexandra` | same as the person's first name, not a company |
+| Company Website | `url` | not a URL at all |
+| How can we help | `idk` | no intent |
+| Budget | Below $10k | lowest band |
+
+Every network check passes here, yet the lead is obviously low quality. So alongside the DNS
+checks, score the submission itself: is `Company Website` a parseable URL that resolves; does
+`Company Name` differ from the contact's own name; is the free-text answer longer than a few
+characters; which budget band. Cheap, deterministic, no API.
+
+This is also why the layer **flags rather than rejects** — an `idk` from a real brand is still
+worth a human glance.
 
 ### Verdict
 
@@ -222,6 +246,95 @@ and whether the note should *also* be added as a pinned Note on the lead (`addNo
 
 ---
 
+## Lead source: the `newbusiness@houseofmarketers.com` inbox
+
+The mail is **not** a customer writing in. It is a **Salesmate form-notification email** from
+`noreply@salesmatemail.com`, sent to `chris@`, `newbusiness@` and `inigo@houseofmarketers.com`.
+The body is a clean `Label: value` list, and the subject carries both the form name and a
+submission number:
+
+```
+GAds Brand Enquiry Contact Form - New Submission [903]
+```
+
+That `[903]` is a per-submission id — a second idempotency key alongside the Gmail message id.
+The form name identifies which campaign the lead came from and maps onto the Pipedrive lead
+label / `source_name`. "A few variations" means a few form names, all with the same body shape.
+
+### Field mapping
+
+| Form field | Goes to |
+|---|---|
+| Full Name | Person name |
+| Email Address | Person email — **the domain we validate** |
+| Mobile Number | Person phone |
+| Company Name | Organization name |
+| Company Website | Organization domain — **also validated** |
+| Country | Person / Organization |
+| Company Industry | Lead note |
+| Client Campaign Budget | Lead value + note |
+| How did you find us? | Lead source |
+| How can we help | Lead note (and the free-text quality signal) |
+| Subject form name | Lead label / `source_name` |
+| Subject `[nnn]` | Idempotency key |
+
+### Consider skipping Gmail entirely
+
+They already run **Salesmate**, which is where these forms live. If Salesmate can POST a
+webhook on form submission, it delivers structured JSON straight to an edge function — no
+OAuth, no admin consent, no HTML parsing, no drift when a form gains a field. That is strictly
+more robust than reading the notification email and should be checked first.
+
+Gmail remains the fallback, and is described below.
+
+### What is needed to connect Gmail
+
+**First, one fork that decides everything:** is `newbusiness@houseofmarketers.com` a real
+Workspace **user mailbox**, or a **Google Group / distribution alias**? (Admin console →
+Directory → Users vs Groups.) The Gmail API can only read a *mailbox*. If it is a group, there
+is nothing to impersonate, and the options become: read `chris@` or `inigo@` instead with a
+Gmail filter isolating these mails, convert the group to a mailbox, or use the Salesmate
+webhook.
+
+**Option A — service account + domain-wide delegation.** Best for an unattended shared inbox.
+Needs:
+
+1. A Google Cloud project with the **Gmail API enabled** — project id.
+2. A **service account** in it, plus a **JSON key** (a secret — goes into Supabase secrets, not
+   into chat or the repo).
+3. A **Workspace super admin** to authorize that service account's numeric **Client ID** under
+   Admin console → Security → Access and data control → API controls → Domain-wide delegation,
+   with scope `https://www.googleapis.com/auth/gmail.readonly` — plus
+   `https://www.googleapis.com/auth/gmail.modify` if we want to label processed mail, which is
+   worth having as a visible audit trail in the inbox itself.
+4. The address to impersonate: `newbusiness@houseofmarketers.com`.
+
+**Option B — OAuth refresh token.** No admin needed, but someone must sign in as that mailbox
+once. Needs client id, client secret, and the resulting refresh token. **Caveat:** if the OAuth
+app is left in "Testing" publishing status the refresh token expires after 7 days and the
+pipeline dies quietly — it must be "In production", or Internal to the Workspace.
+
+**Option C — Google Apps Script.** Lowest setup of the three: someone logged in as the mailbox
+pastes a script with a time-driven trigger that POSTs matching threads to our endpoint with a
+shared secret. No GCP project, no admin involvement. Good if admin access is slow to get.
+
+**Polling, not push.** Gmail push needs a Pub/Sub topic and a verified push endpoint. Polling
+`users.messages.list` every 2 minutes with a narrow query is far less setup for a lead flow
+where two minutes is immaterial:
+
+```
+from:noreply@salesmatemail.com subject:"New Submission" newer_than:1d
+```
+
+### Also worth having
+
+- **3–5 sample emails covering the form variations** (forwarded as `.eml`, or screenshots) so
+  the parser covers all of them rather than just the GAds form.
+- Whether that inbox receives **anything other than these notifications**, which decides how
+  tight the Gmail query needs to be.
+
+---
+
 ## Files to create
 
 All new. Repo is currently empty.
@@ -282,11 +395,10 @@ and optionally `EMAIL_VERIFY_API_KEY`.
 
 Neither blocks starting on the schema, the validation module or the Pipedrive client:
 
-1. **Which inbox receives the leads.** The Gmail connected to this session is the personal
-   `semibvaleria@gmail.com`, not the work inbox. The plan assumes a Google Workspace address
-   read via the Gmail API. If leads instead arrive from a form provider (Typeform, Webflow,
-   HubSpot), hooking that webhook directly is simpler and more reliable than parsing email.
-   *(this is the one real blocker for an end-to-end pipeline)*
+1. **How we read the leads** — Salesmate webhook (preferred) or Gmail on
+   `newbusiness@houseofmarketers.com`. If Gmail: whether that address is a real mailbox or a
+   group, and which of options A/B/C we use. *(the one real blocker for an end-to-end
+   pipeline — see the section above for the exact list of what is needed)*
 2. **Activity defaults** — assumed type `task`, due next business day, and the note *not* also
    duplicated as a pinned Note on the lead. All three are one-line changes.
 3. **What "Ignore" does in Pipedrive.** Assumed: archive (`is_archived: true`) — reversible

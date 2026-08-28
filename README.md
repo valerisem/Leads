@@ -240,11 +240,9 @@ LIVE_DNS_TEST=true npx vitest run test/live.dns.test.ts
 
 ## Connecting the leads inbox
 
-[`docs/GMAIL_SETUP.md`](docs/GMAIL_SETUP.md) compares the three ways to do it.
-The short version: check whether Salesmate can just POST a webhook, and if not
-use [`scripts/apps-script/`](scripts/apps-script/) — about five minutes, no
-Google Cloud project and no admin. The full OAuth route is documented there too,
-with `scripts/get-gmail-refresh-token.mjs` to mint the token.
+[`docs/GMAIL_SETUP.md`](docs/GMAIL_SETUP.md) ranks the push options. Shortest
+path: add an inbound-webhook address as a recipient on the Salesmate form, so
+the lead arrives the moment it is submitted and Gmail is never involved.
 
 ## Notes
 

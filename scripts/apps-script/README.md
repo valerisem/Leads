@@ -1,4 +1,8 @@
-# The easy way to connect the leads inbox
+# Polling fallback
+
+> **Not a trigger.** This checks every 5 minutes. Prefer a push route from
+> [`docs/GMAIL_SETUP.md`](../../docs/GMAIL_SETUP.md); use this only if all of
+> them are blocked.
 
 About **5 minutes**. No Google Cloud project, no OAuth client, no consent
 screen, no Workspace admin, and no credentials to move around.

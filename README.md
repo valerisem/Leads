@@ -240,9 +240,11 @@ LIVE_DNS_TEST=true npx vitest run test/live.dns.test.ts
 
 ## Connecting the leads inbox
 
-`docs/GMAIL_SETUP.md` is the click-by-click guide to producing
-`GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` and `GMAIL_REFRESH_TOKEN`, and
-`scripts/get-gmail-refresh-token.mjs` does the token exchange.
+[`docs/GMAIL_SETUP.md`](docs/GMAIL_SETUP.md) compares the three ways to do it.
+The short version: check whether Salesmate can just POST a webhook, and if not
+use [`scripts/apps-script/`](scripts/apps-script/) — about five minutes, no
+Google Cloud project and no admin. The full OAuth route is documented there too,
+with `scripts/get-gmail-refresh-token.mjs` to mint the token.
 
 ## Notes
 
